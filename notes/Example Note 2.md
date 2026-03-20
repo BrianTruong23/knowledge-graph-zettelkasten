@@ -1,0 +1,1 @@
+Niklas Luhmann was a German sociologist who used the Zettelkasten method extensively. He published over 70 books and 400 scholarly articles, reportedly thanks to his Zettelkasten.

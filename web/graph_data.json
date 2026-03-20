@@ -1,0 +1,20 @@
+{
+  "nodes": [
+    {
+      "id": "Example_Note_1_md",
+      "label": "Example Note 1.md",
+      "type": "note"
+    },
+    {
+      "id": "Visualization_Techniques_md",
+      "label": "Visualization Techniques.md",
+      "type": "note"
+    },
+    {
+      "id": "Example_Note_2_md",
+      "label": "Example Note 2.md",
+      "type": "note"
+    }
+  ],
+  "edges": []
+}

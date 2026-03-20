@@ -1,0 +1,1 @@
+The Zettelkasten method is a knowledge management and note-taking method. It's often associated with Niklas Luhmann. It emphasizes interconnected notes and atomic ideas.

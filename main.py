@@ -1,6 +1,7 @@
 import json
 import os
 import requests
+import hashlib
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 import threading
 
@@ -13,6 +14,8 @@ GRAPH_DATA_FILE = os.path.join(OUTPUT_DIR, "graph_data.json")
 HTML_FILE = os.path.join(OUTPUT_DIR, "index.html")
 GRAPH_JS_FILE = os.path.join(OUTPUT_DIR, "script.js")
 GRAPH_CSS_FILE = os.path.join(OUTPUT_DIR, "style.css")
+CACHE_DIR = os.path.join(OUTPUT_DIR, ".cache")
+CACHE_HASH_FILE = os.path.join(CACHE_DIR, "notes_hash.txt")
 PORT = 8000
 
 def read_notes(notes_dir):
@@ -35,23 +38,42 @@ def call_openrouter_api(prompt, max_tokens=1000):
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
     }
-    data = {
-        "model": OPENROUTER_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-    }
+    data = {"model": OPENROUTER_MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,}
     response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
 
 def generate_graph_data(notes_content):
-    # Ensure all newlines are properly escaped for text sent to LLM in a structured way
-    all_notes_text = "\n\n---\n\n".join([
-        f"## {title}\n{content}"
-        for title, content in notes_content.items()
-    ])
-    # Note: Using json.dumps to handle internal quotes and newlines in content, then slicing [1:-1] to remove enclosing quotes
-    # This assumes the LLM can parse this structure effectively.
+
+    # Calculate hash of current notes content for caching
+    notes_combined_content = json.dumps(notes_content, sort_keys=True)
+    notes_hash_str = hashlib.md5(notes_combined_content.encode('utf-8')).hexdigest()
+
+    # Check for cached data
+    if os.path.exists(GRAPH_DATA_FILE) and os.path.exists(CACHE_HASH_FILE):
+        with open(CACHE_HASH_FILE, 'r') as f:
+            cached_hash = f.read().strip()
+        
+        if cached_hash == notes_hash_str:
+            print("Notes content has not changed. Loading graph data from cache.")
+            with open(GRAPH_DATA_FILE, 'r', encoding='utf-8') as f:
+                graph_data = json.load(f)
+            
+            # Ensure fullText is present for note nodes from cache
+            for filename, content in notes_content.items():
+                note_id = "note_" + filename.lower().replace('.md', '').replace('.txt', '').replace(' ', '_').replace('-', '_')
+                for node in graph_data["nodes"]:
+                    if node.get("id") == note_id and node.get("type") == "note" and "fullText" not in node:
+                        node["fullText"] = content
+            
+            return graph_data
+        else:
+            print("Notes content has changed. Regenerating graph data...")
+    else:
+        print("No cached graph data found or hash mismatch. Generating new data...")
+
+    # If no cache or cache invalid, proceed with LLM call
+    all_notes_text = "\n\n---\n\n".join([f"## {title}\n{content}" for title, content in notes_content.items()])
 
     # Prompt for topic extraction
     topic_prompt = f"""
@@ -70,12 +92,12 @@ def generate_graph_data(notes_content):
     "edges" should be an array of objects, each representing a relationship between nodes.
     Each edge object should have:
     - "from": The "id" of the source node.
-    - "to": The "id" of the target node.
-    - "label": A brief description of the relationship (e.g., "expands on", "references", "related to").
-    - "arrows": "to" or "from" or "to;from" indicating direction.
-    - "color": A CSS color string (e.g., "#FF0000") to categorize relationships (optional).
+- "to": The "id" of the target node.
+- "label": A brief description of the relationship (e.g., "expands on", "references", "related to").
+- "arrows": "to" or "from" or "to;from" indicating direction.
+- "color": A CSS color string (e.g., "#FF0000") to categorize relationships (optional).
 
-    Here are the notes in JSON format (title and content): 
+    Here are the notes:
     {all_notes_text}
 
     Ensure the output is a single, valid JSON object with "nodes" and "edges" arrays.
@@ -97,7 +119,7 @@ def generate_graph_data(notes_content):
     # Ensure individual notes are added as nodes if not already by the LLM
     # And add fullText to note nodes
     for filename, content in notes_content.items():
-        note_id = "note_" + filename.lower().replace('.md', '').replace('.txt', '').replace(' ', '_').replace('-', '_')
+        note_id = "note_" + filename.lower().replace('.md', '').replace('.txt', '').replace(' ', '_').replace('-', '_') # Simple sanitization
         if not any(node.get("id") == note_id for node in graph_data["nodes"]):
             graph_data["nodes"].append({"id": note_id, "label": filename.replace('.md', '').replace('.txt', ''), "type": "note", "fullText": content})
         else:
@@ -105,6 +127,11 @@ def generate_graph_data(notes_content):
             for node in graph_data["nodes"]:
                 if node.get("id") == note_id and "fullText" not in node:
                     node["fullText"] = content
+    
+    # Save the new hash to cache
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(CACHE_HASH_FILE, 'w') as f:
+        f.write(notes_hash_str)
 
     return graph_data
 
@@ -144,7 +171,7 @@ def main():
         return
 
     # --- Main Logic: Generate and Save Graph Data ---
-    # 3. Generate graph data using OpenRouter
+    # 3. Generate graph data using OpenRouter (with caching)
     graph_data = generate_graph_data(notes)
 
     # 4. Save graph data to be consumed by the web visualization
@@ -152,11 +179,98 @@ def main():
 
     # --- Web Visualization Setup (Static Files) ---
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    # HTML content - now loaded from existing file
-    # CSS content - now loaded from existing file
-    # JS content - now loaded from existing file
+    with open(HTML_FILE, "w") as f:
+        f.write("""<!DOCTYPE html>
+<html>
+<head>
+    <title>Knowledge Graph Visualization</title>
+    <link rel="stylesheet" href="style.css">
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+</head>
+<body>
+    <div id="mynetwork"></div>
+    <script src="script.js"></script>
+</body>
+</html>""")
 
-    # 5. Start local HTTP server in a new thread
+    with open(GRAPH_CSS_FILE, "w") as f:
+        f.write("""#mynetwork {
+    width: 100%;
+    height: 90vh;
+    border: 1px solid lightgray;
+    background-color: #f9f9f9;
+}""")
+    
+    with open(GRAPH_JS_FILE, "w") as f:
+        f.write("""document.addEventListener('DOMContentLoaded', function () {
+    fetch('graph_data.json')
+        .then(response => response.json())
+        .then(data => {
+            const nodes = new vis.DataSet(data.nodes);
+            const edges = new vis.DataSet(data.edges);
+
+            const container = document.getElementById('mynetwork');
+            const graphData = { nodes: nodes, edges: edges };
+            const options = {
+                nodes: {
+                    shape: 'dot',
+                    size: 16,
+                    font: {
+                        size: 14,
+                        color: '#333'
+                    },
+                    borderWidth: 2
+                },
+                edges: {
+                    width: 2,
+                    arrows: 'to',
+                    color: { inherit: 'from' }
+                },
+                physics: {
+                    enabled: true,
+                    barnesHut: {
+                        gravitationalConstant: -2000,
+                        centralGravity: 0.3,
+                        springLength: 95,
+                        springConstant: 0.04,
+                        damping: 0.09,
+                        avoidOverlap: 0.8
+                    },
+                    solver: 'barnesHut',
+                    stabilization: {
+                        enabled: true,
+                        iterations: 2500,
+                        updateInterval: 25
+                    }
+                },
+                interaction: {
+                    navigationButtons: true,
+                    keyboard: true
+                }
+            };
+
+            const network = new vis.Network(container, graphData, options);
+
+            // Add double click listener for node details
+            network.on("doubleClick", function (params) {
+                if (params.nodes.length > 0) {
+                    const nodeId = params.nodes[0];
+                    const node = nodes.get(nodeId);
+                    if (node && node.type === 'note') {
+                        // For a 'note' type node, maybe highlight it or show its raw text
+                        alert('Note: ' + node.label + '\n\nContent: ' + node.fullText); // Assuming fullText exists
+                    } else if (node && node.type === 'topic') {
+                        alert('Topic: ' + node.label);
+                    }
+                }
+            });
+        })
+        .catch(error => console.error('Error fetching graph data:', error));
+});""")
+    
+    print(f"Web visualization files created in {OUTPUT_DIR}/")
+
+    # 6. Start local HTTP server in a new thread
     server_thread = threading.Thread(target=start_http_server)
     server_thread.daemon = True  # Allows the main program to exit even if the thread is running
     server_thread.start()
